@@ -164,7 +164,7 @@ async def discover(
                 f"title={bucket_title(bucket_map, task.bucket_id)!r}"
             )
     else:
-        info("get_project_buckets not available — install merged main with bucket support")
+        info("get_project_buckets not available — install bucket support")
 
     return project, task, account_labels, bucket_map, kanban_view, {label.id: label.title for label in account_labels}
 
