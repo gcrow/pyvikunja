@@ -10,13 +10,14 @@ From the repository root:
 
 ```bash
 uv venv
-uv pip install -e .
+uv sync
+# or: uv pip install -e .
 ```
 
 ### Run
 
 ```bash
-uv run python scripts/integration_test.py
+uv run python scripts/integration_test.py --base-url "https://your-vikunja-host"
 ```
 
 You will be prompted for your Vikunja API token (hidden input). Alternatively set `VIKUNJA_TOKEN` in the environment.
@@ -26,7 +27,8 @@ You will be prompted for your Vikunja API token (hidden input). Alternatively se
 | Flag | Purpose |
 |------|---------|
 | `--discovery-only` | List projects/tasks/buckets; no writes |
-| `--yes` | Skip the `yes` confirmation before mutations |
+| `--yes` | Auto-confirm every step (no y/n gates) |
+| `--verbose` | Show httpx request/response logs |
 | `--no-restore` | Leave the task modified after the run |
 | `--project Finances` | Project title to match |
 | `--bucket Backlog` | Bucket title for the move test |
