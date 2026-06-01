@@ -186,8 +186,30 @@ class VikunjaAPI:
         response = await self._request("GET", f"/projects/{project_id}/views/{view_id}/buckets")
         return [Bucket(bucket_data) for bucket_data in response['data'] or []]
 
-    # Move a task into a bucket using the view-scoped bucket endpoint
+    async def get_kanban_task_bucket_map(self, project_id: int, view_id: int) -> Dict[int, int]:
+        """
+        Map task_id -> bucket_id for tasks on a kanban view.
+        Uses GET /projects/{id}/views/{view}/tasks, which returns buckets with nested
+        tasks. bucket_id is often omitted on flat project task lists and on GET /tasks/{id}.
+        """
+        response = await self._request("GET", f"/projects/{project_id}/views/{view_id}/tasks")
+        data = response["data"]
+        task_to_bucket: Dict[int, int] = {}
+        if not isinstance(data, list):
+            return task_to_bucket
+        if data and isinstance(data[0], dict) and "tasks" in data[0]:
+            for bucket_data in data:
+                bucket_id = bucket_data.get("id")
+                if bucket_id is None:
+                    continue
+                for task_data in bucket_data.get("tasks") or []:
+                    task_id = task_data.get("id")
+                    if task_id is not None:
+                        task_to_bucket[task_id] = bucket_id
+        return task_to_bucket 
+
     async def move_task_to_bucket(
+        # Move a task into a bucket using the view-scoped bucket endpoint
             self,
             project_id: int,
             view_id: int,
