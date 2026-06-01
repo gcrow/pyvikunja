@@ -4,7 +4,6 @@ from typing import Dict, Optional, List
 from pyvikunja.models.bucket import Bucket
 from pyvikunja.models.enum.repeat_mode import RepeatMode
 from pyvikunja.models.enum.task_priority import Priority
-from pyvikunja.api import APIError
 from pyvikunja.models.label import Label
 from pyvikunja.models.models import BaseModel
 from pyvikunja.models.user import User
@@ -151,20 +150,9 @@ class Task(BaseModel):
         return self
 
     async def add_label(self, label_id: int) -> 'Task':
-        """ 
-        Add a single label to this task
-        Handle '400 label already exists' errors as successses for times when task.labels is stale
-        or labels are not returned in prior calls
-        """
+        """Add a single label to this task."""
         if label_id not in {label.id for label in self.labels}:
-            try:
-                await self.api.add_task_label(self.id, label_id)
-            except Exception as exc:
-                from pyvikunja.api import APIError
-                if not isinstance(exc, APIError) or exc.status_code != 400:
-                    raise
-                if "already exists" not in exc.message.lower():
-                    raise
+            await self.api.add_task_label(self.id, label_id)
         return await self._refresh_from_api()
 
     async def add_labels(self, label_ids: List[int]) -> 'Task':
