@@ -84,6 +84,13 @@ def bucket_title(bucket_map: Dict[int, str], bucket_id: Optional[int]) -> str:
     return bucket_map.get(bucket_id, f"?id={bucket_id}")
 
 
+def truncate_cell(text: str, max_len: int) -> str:
+    text = " ".join(text.split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
 def prompt_yes(prompt: str, default_no: bool = True) -> bool:
     suffix = " [y/N]: " if default_no else " [Y/n]: "
     answer = input(prompt + suffix).strip().lower()
@@ -142,12 +149,16 @@ def print_discovery_summary(
         warn("no kanban view — bucket tests unavailable")
 
     print()
-    print(f"  {'Idx':<4} {'TaskId':<8} {'Bucket':<22} {'Labels'}")
-    print(f"  {'-'*4} {'-'*8} {'-'*22} {'-'*30}")
+    print(f"  {'Idx':<4} {'TaskId':<8} {'Title':<34} {'Bucket':<14} {'Labels'}")
+    print(f"  {'-'*4} {'-'*8} {'-'*34} {'-'*14} {'-'*30}")
     for index, task in enumerate(tasks):
         bid = task_bucket_map.get(task.id, task.bucket_id)
         bucket_cell = bucket_title(bucket_map, bid)
-        print(f"  {index:<4} {task.id:<8} {bucket_cell:<22} {format_labels(task.labels)}")
+        title_cell = truncate_cell(task.title, 34)
+        print(
+            f"  {index:<4} {task.id:<8} {title_cell:<34} {bucket_cell:<14} "
+            f"{format_labels(task.labels)}"
+        )
 
     print()
     info(f"Account labels ({len(account_labels)}): " + ", ".join(
@@ -186,6 +197,58 @@ async def resolve_task_bucket_id(
                     return bucket.id
 
     return task_from_api.bucket_id
+
+
+async def fetch_bucket_placement(
+    api: VikunjaAPI,
+    project_id: int,
+    kanban_view: ProjectView,
+    task_id: int,
+) -> tuple[Optional[int], Optional[int]]:
+    """Return (get_task.bucket_id, bucket id from kanban view map)."""
+    task = await api.get_task(task_id)
+    kanban_map = await api.get_kanban_task_bucket_map(project_id, kanban_view.id)
+    return task.bucket_id, kanban_map.get(task_id)
+
+
+def bucket_placement_matches(
+    expected_bucket_id: int,
+    get_task_bucket_id: Optional[int],
+    kanban_bucket_id: Optional[int],
+) -> bool:
+    # Kanban map is authoritative when get_task omits bucket_id (common Vikunja behavior).
+    if kanban_bucket_id == expected_bucket_id:
+        return True
+    return get_task_bucket_id == expected_bucket_id
+
+
+async def assert_bucket_placement(
+    api: VikunjaAPI,
+    project_id: int,
+    kanban_view: ProjectView,
+    task_id: int,
+    expected_bucket_id: int,
+    bucket_map: Dict[int, str],
+    context: str,
+) -> None:
+    get_task_bucket_id, kanban_bucket_id = await fetch_bucket_placement(
+        api, project_id, kanban_view, task_id
+    )
+    if not bucket_placement_matches(expected_bucket_id, get_task_bucket_id, kanban_bucket_id):
+        fail(
+            f"{context}: expected bucket {expected_bucket_id} "
+            f"({bucket_title(bucket_map, expected_bucket_id)}), "
+            f"kanban_map={kanban_bucket_id}, get_task.bucket_id={get_task_bucket_id}"
+        )
+        raise RuntimeError(f"{context}: bucket verification failed")
+
+    ok(
+        f"{context}: bucket {expected_bucket_id} "
+        f"({bucket_title(bucket_map, expected_bucket_id)})"
+    )
+    info(f"kanban_map={kanban_bucket_id}, get_task.bucket_id={get_task_bucket_id or '—'}")
+    if get_task_bucket_id != expected_bucket_id and kanban_bucket_id == expected_bucket_id:
+        info("GET /tasks/{id} omits bucket_id; verified via kanban view map")
 
 
 async def discover(
@@ -392,10 +455,12 @@ async def run_bucket_tests(
         )
     ok(f"target {target_bucket_title!r} → bucket id {backlog_id}")
 
-    task = await api.get_task(task.id)
+    get_task_before, kanban_before = await fetch_bucket_placement(
+        api, project.id, kanban_view, task.id
+    )
     info(
-        f"before: bucket_id={task.bucket_id} "
-        f"({bucket_title(bucket_map, task.bucket_id)})"
+        f"before: kanban_map={kanban_before} ({bucket_title(bucket_map, kanban_before)}), "
+        f"get_task.bucket_id={get_task_before or '—'}"
     )
 
     if not auto_yes and not prompt_yes(f"Move task {task.id} to {target_bucket_title!r} (id={backlog_id})?"):
@@ -403,24 +468,24 @@ async def run_bucket_tests(
         return None
 
     async def move():
-        nonlocal task
         await task.set_bucket(backlog_id)
-        task = await api.get_task(task.id)
-        if task.bucket_id != backlog_id:
-            info("set_bucket did not stick; trying move_task_to_bucket")
-            task = await api.move_task_to_bucket(
+        get_task_after, kanban_after = await fetch_bucket_placement(
+            api, project.id, kanban_view, task.id
+        )
+        if not bucket_placement_matches(backlog_id, get_task_after, kanban_after):
+            info("set_bucket not visible on kanban map; trying move_task_to_bucket")
+            await api.move_task_to_bucket(
                 project.id, kanban_view.id, backlog_id, task.id
             )
-        if task.bucket_id != backlog_id:
-            mapped = await api.get_kanban_task_bucket_map(project.id, kanban_view.id)
-            actual = mapped.get(task.id)
-            fail(
-                f"expected bucket_id={backlog_id}, "
-                f"get_task.bucket_id={task.bucket_id}, kanban_map={actual}"
-            )
-            raise RuntimeError("bucket move verification failed")
-        info(f"after: bucket_id={task.bucket_id} ({bucket_title(bucket_map, task.bucket_id)})")
-        return task
+        await assert_bucket_placement(
+            api,
+            project.id,
+            kanban_view,
+            task.id,
+            backlog_id,
+            bucket_map,
+            "after move",
+        )
 
     await run_step("B1", f"move to {target_bucket_title!r}", move)
     return backlog_id
@@ -448,9 +513,11 @@ async def restore_bucket(
             info("initial bucket was unset — nothing to restore")
         return
 
-    task = await api.get_task(task.id)
-    if initial_bucket_id == task.bucket_id:
-        ok("bucket already at initial value")
+    _, kanban_current = await fetch_bucket_placement(
+        api, project.id, kanban_view, task.id
+    )
+    if bucket_placement_matches(initial_bucket_id, None, kanban_current):
+        ok("bucket already at initial value (per kanban map)")
         return
 
     if not auto_yes and not prompt_yes(
@@ -460,18 +527,24 @@ async def restore_bucket(
         return
 
     async def action():
-        nonlocal task
         await task.set_bucket(initial_bucket_id)
-        task = await api.get_task(task.id)
-        if task.bucket_id != initial_bucket_id:
-            task = await api.move_task_to_bucket(
+        get_task_after, kanban_after = await fetch_bucket_placement(
+            api, project.id, kanban_view, task.id
+        )
+        if not bucket_placement_matches(initial_bucket_id, get_task_after, kanban_after):
+            info("set_bucket not visible on kanban map; trying move_task_to_bucket")
+            await api.move_task_to_bucket(
                 project.id, kanban_view.id, initial_bucket_id, task.id
             )
-        if task.bucket_id != initial_bucket_id:
-            raise RuntimeError(
-                f"restore failed: expected {initial_bucket_id}, got {task.bucket_id}"
-            )
-        return task
+        await assert_bucket_placement(
+            api,
+            project.id,
+            kanban_view,
+            task.id,
+            initial_bucket_id,
+            bucket_map,
+            "after restore",
+        )
 
     await run_step(
         "R-B",
@@ -609,8 +682,13 @@ async def main_async(args: argparse.Namespace) -> int:
     except APIError:
         print(f"\n  Stopped at step: {FAILED_STEP or 'unknown'}\n", file=sys.stderr)
         return 1
-    except (RuntimeError, KeyboardInterrupt) as exc:
+    except RuntimeError as exc:
         print(f"\n  {exc}", file=sys.stderr)
+        if FAILED_STEP:
+            print(f"  Last step: {FAILED_STEP}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\n  Interrupted.", file=sys.stderr)
         if FAILED_STEP:
             print(f"  Last step: {FAILED_STEP}", file=sys.stderr)
         return 1
