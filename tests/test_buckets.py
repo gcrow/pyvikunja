@@ -88,6 +88,29 @@ class TestTaskBucketParsing(unittest.TestCase):
 
 
 class TestBucketAPI(unittest.IsolatedAsyncioTestCase):
+    async def test_get_kanban_task_bucket_map(self):
+        api = VikunjaAPI('https://vikunja.example', 'token')
+        api._request = AsyncMock(return_value={
+            'data': [
+                {
+                    'id': 32,
+                    'title': 'Backlog',
+                    'tasks': [{'id': 82, 'title': 'File tax extension form'}],
+                },
+                {
+                    'id': 7,
+                    'title': 'Ready',
+                    'tasks': [{'id': 1, 'title': 'Other task'}],
+                },
+            ],
+            'headers': {},
+        })
+
+        mapping = await api.get_kanban_task_bucket_map(project_id=3, view_id=12)
+
+        api._request.assert_awaited_once_with('GET', '/projects/3/views/12/tasks')
+        self.assertEqual(mapping, {82: 32, 1: 7})
+
     async def test_get_project_buckets(self):
         api = VikunjaAPI('https://vikunja.example', 'token')
         api._request = AsyncMock(return_value={
