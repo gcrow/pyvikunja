@@ -166,6 +166,7 @@ class VikunjaAPI:
         return [Task(self, task_data) for task_data in response or []]
 
     async def get_task(self, task_id: int) -> Task:
+        # Often does not return bucket_id
         data = await self._request("GET", f"/tasks/{task_id}")
         return Task(self, data['data'])
 
@@ -261,8 +262,10 @@ class VikunjaAPI:
                 data={"label_id": label_id},
             )
         except APIError as exc:
-            # Vikunja returns 400 when attempting to add a label that is already present.
-            # Treat this as success to make label assignment idempotent for callers.
+            """
+            Vikunja returns 400 when attempting to add a label that is already present.
+            Treat this as success to make label assignment idempotent for callers.
+            """
             if exc.status_code == 400 and "already exists" in exc.message.lower():
                 return
             raise

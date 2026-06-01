@@ -178,7 +178,10 @@ class Task(BaseModel):
         return await self.update({'project_id': project_id})
 
     async def set_bucket(self, bucket_id: int) -> 'Task':
-        # Move the task to a bucket within the same project view
+        """
+        Move the task to a bucket within the same project view
+        May not be reliable on all vikunja instances. Consider using move_task_to_bucket instead.
+        """
         return await self.update({'bucket_id': bucket_id})
 
     async def set_due_date(self, date: datetime) -> 'Task':

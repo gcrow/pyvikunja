@@ -173,53 +173,46 @@ def print_discovery_summary(
             info(f"  {bid:>4}  {display}")
 
 
+async def get_kanban_bucket_id(
+    api: VikunjaAPI,
+    project_id: int,
+    kanban_view: ProjectView,
+    task_id: int,
+) -> Optional[int]:
+    """Bucket column for a task from the kanban view (authoritative for placement)."""
+    kanban_map = await api.get_kanban_task_bucket_map(project_id, kanban_view.id)
+    return kanban_map.get(task_id)
+
+
 async def resolve_task_bucket_id(
     api: VikunjaAPI,
     project_id: int,
     kanban_view: Optional[ProjectView],
     task_id: int,
-    task_from_api: Task,
+    task_bucket_map: Optional[Dict[int, int]] = None,
 ) -> Optional[int]:
-    """Resolve bucket_id via kanban view map, expand=buckets, then plain get_task."""
+    """
+    Resolve bucket_id for display/snapshot.
+
+    Uses the kanban task→bucket map only. GET /tasks/{id} often omits bucket_id on Vikunja,
+    so it is not used here.
+    """
+    if task_bucket_map is not None and task_id in task_bucket_map:
+        return task_bucket_map[task_id]
+
     if kanban_view is not None:
-        bucket_map = await api.get_kanban_task_bucket_map(project_id, kanban_view.id)
-        if task_id in bucket_map:
-            return bucket_map[task_id]
+        bucket_id = await get_kanban_bucket_id(api, project_id, kanban_view, task_id)
+        if bucket_id is not None:
+            return bucket_id
 
-    if hasattr(api, "get_tasks"):
-        for expanded_task in await api.get_tasks(project_id, expand="buckets"):
-            if expanded_task.id != task_id:
-                continue
-            if expanded_task.bucket_id is not None:
-                return expanded_task.bucket_id
-            for bucket in expanded_task.buckets:
-                if bucket.id is not None:
-                    return bucket.id
+    for expanded_task in await api.get_tasks(project_id, expand="buckets"):
+        if expanded_task.id != task_id:
+            continue
+        for bucket in expanded_task.buckets:
+            if bucket.id is not None:
+                return bucket.id
 
-    return task_from_api.bucket_id
-
-
-async def fetch_bucket_placement(
-    api: VikunjaAPI,
-    project_id: int,
-    kanban_view: ProjectView,
-    task_id: int,
-) -> tuple[Optional[int], Optional[int]]:
-    """Return (get_task.bucket_id, bucket id from kanban view map)."""
-    task = await api.get_task(task_id)
-    kanban_map = await api.get_kanban_task_bucket_map(project_id, kanban_view.id)
-    return task.bucket_id, kanban_map.get(task_id)
-
-
-def bucket_placement_matches(
-    expected_bucket_id: int,
-    get_task_bucket_id: Optional[int],
-    kanban_bucket_id: Optional[int],
-) -> bool:
-    # Kanban map is authoritative when get_task omits bucket_id (common Vikunja behavior).
-    if kanban_bucket_id == expected_bucket_id:
-        return True
-    return get_task_bucket_id == expected_bucket_id
+    return None
 
 
 async def assert_bucket_placement(
@@ -231,24 +224,19 @@ async def assert_bucket_placement(
     bucket_map: Dict[int, str],
     context: str,
 ) -> None:
-    get_task_bucket_id, kanban_bucket_id = await fetch_bucket_placement(
-        api, project_id, kanban_view, task_id
-    )
-    if not bucket_placement_matches(expected_bucket_id, get_task_bucket_id, kanban_bucket_id):
+    kanban_bucket_id = await get_kanban_bucket_id(api, project_id, kanban_view, task_id)
+    if kanban_bucket_id != expected_bucket_id:
         fail(
             f"{context}: expected bucket {expected_bucket_id} "
             f"({bucket_title(bucket_map, expected_bucket_id)}), "
-            f"kanban_map={kanban_bucket_id}, get_task.bucket_id={get_task_bucket_id}"
+            f"kanban_map={kanban_bucket_id}"
         )
         raise RuntimeError(f"{context}: bucket verification failed")
 
     ok(
         f"{context}: bucket {expected_bucket_id} "
-        f"({bucket_title(bucket_map, expected_bucket_id)})"
+        f"({bucket_title(bucket_map, expected_bucket_id)}) per kanban map"
     )
-    info(f"kanban_map={kanban_bucket_id}, get_task.bucket_id={get_task_bucket_id or '—'}")
-    if get_task_bucket_id != expected_bucket_id and kanban_bucket_id == expected_bucket_id:
-        info("GET /tasks/{id} omits bucket_id; verified via kanban view map")
 
 
 async def discover(
@@ -455,13 +443,8 @@ async def run_bucket_tests(
         )
     ok(f"target {target_bucket_title!r} → bucket id {backlog_id}")
 
-    get_task_before, kanban_before = await fetch_bucket_placement(
-        api, project.id, kanban_view, task.id
-    )
-    info(
-        f"before: kanban_map={kanban_before} ({bucket_title(bucket_map, kanban_before)}), "
-        f"get_task.bucket_id={get_task_before or '—'}"
-    )
+    kanban_before = await get_kanban_bucket_id(api, project.id, kanban_view, task.id)
+    info(f"before: {bucket_title(bucket_map, kanban_before)} (kanban map id={kanban_before})")
 
     if not auto_yes and not prompt_yes(f"Move task {task.id} to {target_bucket_title!r} (id={backlog_id})?"):
         warn("skipped bucket move")
@@ -469,11 +452,9 @@ async def run_bucket_tests(
 
     async def move():
         await task.set_bucket(backlog_id)
-        get_task_after, kanban_after = await fetch_bucket_placement(
-            api, project.id, kanban_view, task.id
-        )
-        if not bucket_placement_matches(backlog_id, get_task_after, kanban_after):
-            info("set_bucket not visible on kanban map; trying move_task_to_bucket")
+        kanban_after = await get_kanban_bucket_id(api, project.id, kanban_view, task.id)
+        if kanban_after != backlog_id:
+            info("set_bucket not reflected on kanban map yet; trying move_task_to_bucket")
             await api.move_task_to_bucket(
                 project.id, kanban_view.id, backlog_id, task.id
             )
@@ -513,10 +494,8 @@ async def restore_bucket(
             info("initial bucket was unset — nothing to restore")
         return
 
-    _, kanban_current = await fetch_bucket_placement(
-        api, project.id, kanban_view, task.id
-    )
-    if bucket_placement_matches(initial_bucket_id, None, kanban_current):
+    kanban_current = await get_kanban_bucket_id(api, project.id, kanban_view, task.id)
+    if kanban_current == initial_bucket_id:
         ok("bucket already at initial value (per kanban map)")
         return
 
@@ -528,11 +507,9 @@ async def restore_bucket(
 
     async def action():
         await task.set_bucket(initial_bucket_id)
-        get_task_after, kanban_after = await fetch_bucket_placement(
-            api, project.id, kanban_view, task.id
-        )
-        if not bucket_placement_matches(initial_bucket_id, get_task_after, kanban_after):
-            info("set_bucket not visible on kanban map; trying move_task_to_bucket")
+        kanban_after = await get_kanban_bucket_id(api, project.id, kanban_view, task.id)
+        if kanban_after != initial_bucket_id:
+            info("set_bucket not reflected on kanban map yet; trying move_task_to_bucket")
             await api.move_task_to_bucket(
                 project.id, kanban_view.id, initial_bucket_id, task.id
             )
@@ -594,25 +571,24 @@ async def main_async(args: argparse.Namespace) -> int:
         ok(f"selected [{task_index}] task_id={task.id} title={task.title!r}")
 
         resolved_bucket = await resolve_task_bucket_id(
-            api, project.id, kanban_view, task.id, task
+            api, project.id, kanban_view, task.id, task_bucket_map
         )
         section("Selected task detail")
         info(f"task_id:        {task.id}")
         info(f"title:          {task.title!r}")
         info(f"project_id:     {task.project_id}")
-        info(f"get_task bucket_id:     {task.bucket_id}")
-        info(f"kanban map bucket_id:   {task_bucket_map.get(task.id, '—')}")
-        info(f"resolved bucket_id:     {resolved_bucket} ({bucket_title(bucket_map, resolved_bucket)})")
+        info(
+            f"bucket (kanban): {resolved_bucket} "
+            f"({bucket_title(bucket_map, resolved_bucket)}) — used for bucket tests"
+        )
+        if task.bucket_id is not None and task.bucket_id != resolved_bucket:
+            warn(f"get_task.bucket_id={task.bucket_id} differs from kanban map (ignored)")
         info(f"labels (embedded):      {format_labels(task.labels)}")
         task_labels = await api.get_task_labels(task.id)
         info(f"get_task_labels:        {format_labels(task_labels)}")
 
         if resolved_bucket is None and kanban_view is not None:
-            warn(
-                "bucket_id is missing on GET /tasks/{id} and kanban map — "
-                "common Vikunja behavior: bucket placement is per view. "
-                "Bucket move test can still run; read-back may use kanban map."
-            )
+            warn("task not found in kanban map — bucket move/restore may not apply")
 
         auto_yes = args.yes
         if not auto_yes and not prompt_yes(
