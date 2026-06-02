@@ -29,9 +29,9 @@ from pyvikunja.models.task import Task
 
 T = TypeVar("T")
 
-DEFAULT_BASE_URL = "https://vikky.solroshus.com"
-DEFAULT_PROJECT_TITLE = "Finances"
-TARGET_BUCKET_TITLE = "Backlog"
+DEFAULT_BASE_URL = "https://changeme.test.home"
+DEFAULT_PROJECT_TITLE = "test"
+TARGET_BUCKET_TITLE = "To-Do"
 
 # Set by run_step() when a step fails
 FAILED_STEP: Optional[str] = None
